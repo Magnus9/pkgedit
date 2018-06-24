@@ -1,0 +1,239 @@
+#!/usr/bin/env ruby
+require "getoptlong"
+
+=begin
+  XXX; make more generic code for pkg.*, make more strict
+  patterns, remove bitmaps, add pkg.license.
+=end
+opts = GetoptLong.new(
+  ["-m", "--make",      GetoptLong::NO_ARGUMENT],
+  ["-a", "--add",       GetoptLong::NO_ARGUMENT],
+  ["-d", "--del",       GetoptLong::NO_ARGUMENT],
+  ["-V", "--var",       GetoptLong::NO_ARGUMENT],
+  ["-n", "--name",      GetoptLong::REQUIRED_ARGUMENT],
+  ["-e", "--edit",      GetoptLong::NO_ARGUMENT],
+  ["-u", "--pkg.use",   GetoptLong::NO_ARGUMENT],
+  ["-M", "--pkg.mask",  GetoptLong::NO_ARGUMENT],
+  ["-U", "--pkg.umask", GetoptLong::NO_ARGUMENT],
+  ["-k", "--pkg.kwd",   GetoptLong::NO_ARGUMENT],
+  ["-h", "--help",      GetoptLong::NO_ARGUMENT],
+  ["-v", "--version",   GetoptLong::NO_ARGUMENT]
+)
+
+class Pkgedit
+  # Types for what pkgedit will modify. 
+  TYPE_MAKE      = 0
+  TYPE_PKG_USE   = 1
+  TYPE_PKG_MASK  = 2
+  TYPE_PKG_UMASK = 3
+  TYPE_PKG_KWD   = 4
+  # Modifiers for how pkgedit will handle a type.
+  MODIFIER_ADD   = 1
+  MODIFIER_DEL   = 2
+  MODIFIER_VAR   = 4
+  # Maximum length spanning one line (USE variable).
+  MAXIMUM_LEN    = 60
+
+  def initialize(type, modifier, name, args)
+    @type     = type
+    @modifier = modifier
+    @name     = name ? name : "pkgedit"
+    @args     = args
+    case @type
+    when TYPE_MAKE
+      edit_make_cfg
+    when TYPE_PKG_USE
+      edit_pkg_use
+    when TYPE_PKG_KWD
+      edit_pkg_kwd
+    when TYPE_PKG_MASK, TYPE_PKG_UMASK
+      edit_pkg_xmask
+    end
+  end
+
+  def edit_pkg_xmask
+    xmask = @type == TYPE_PKG_MASK ? "mask" : "unmask"
+    path  = "/etc/portage/package.#{xmask}"
+    if File.file?(path)
+      ctx = File.new(path, "a+")
+    else
+      Dir.mkdir(path) if not Dir.exists?(path)
+      ctx = File.new("#{path}/#{@name}", "a+")
+    end
+    data = ctx.read
+    data.concat("\n") if data[-1] != "\n" and data[-1] != nil
+    @args.each do |arg|
+      if (@modifier & MODIFIER_ADD).positive?
+        if not arg.match(/^[<>]?=?[\w\-]+\/\w+(-[\d.-]+(-r\d)?)?$/)
+          $stderr.puts("warning: invalid atom for arg '#{arg}.'")
+          next
+        end
+        data.concat("#{arg}\n")
+      else
+        data.gsub!(/[<>]?=?#{arg}.*\n*/, "")
+      end
+    end
+    ctx.truncate(0)
+    ctx.write(data)
+  end
+
+  def edit_pkg_kwd
+    path = "/etc/portage/package.keywords"
+    if File.file?(path)
+      ctx = File.new(path, "a+")
+    else
+      Dir.mkdir(path) if not Dir.exists?(path)
+      ctx = File.new("#{path}/#{@name}", "a+")
+    end
+    data = ctx.read
+    data.concat("\n") if data[-1] != "\n" and data[-1] != nil
+    @args.each do |arg|
+      if (@modifier & MODIFIER_ADD).positive?
+        if not arg.match(/^[<>]?=?[\w\-]+\/\w+(-[\d.-]+(-r\d)?)?\s+~\w+$/)
+          $stderr.puts("warning: invalid atom for arg '#{arg}.'")
+          next
+        end
+        data.concat("#{arg}\n")
+      else
+        data.gsub!(/[<>]?=?#{arg}.+\n*/, "")
+      end
+    end
+    ctx.truncate(0)
+    ctx.write(data)
+  end
+
+  def edit_pkg_use
+    path = "/etc/portage/package.use"
+    if File.file?(path)
+      ctx = File.new(path, "a+")
+    else
+      Dir.mkdir(path) if not Dir.exists?(path)
+      ctx = File.new("#{path}/#{@name}", "a+")
+    end
+    data = ctx.read()
+    data.concat("\n") if data[-1] != "\n" and data[-1] != nil
+    @args.each do |arg|
+      if (@modifier & MODIFIER_ADD).positive?
+        if not arg.match(/^[<>]?=?[\w\-]+\/\w+(-[\d.-]+(-r\d)?)?(\s+-?\w+)+$/)
+          $stderr.puts("warning: invalid atom for arg '#{arg}'.")
+          next
+        end
+        data.concat("#{arg}\n")
+      else
+        data.gsub!(/[<>]?=?#{arg}[\-\s].+\n*/, "")
+      end
+    end
+    ctx.truncate(0)
+    ctx.write(data)
+  end
+
+  def edit_make_cfg
+    File.open("/etc/portage/make.conf", "a+") do |f|
+      data = f.read
+      if (@modifier & MODIFIER_VAR).zero?
+        data.concat("USE=\"\"") if not data.include?("USE=")
+        use = data.match(/^USE=["']?([^"']*)["']?$/)
+        if not use
+          raise Exception, "errornous 'USE' variable in make.conf."
+        end
+        use = use[1].gsub("\\\n", "")
+        buf = ""
+        len = 0
+        use.split.each do |flag|
+          if len >= MAXIMUM_LEN
+            buf += "\n"
+            len  = 0
+          end
+          if (@modifier & MODIFIER_DEL).positive? and @args.include?(flag)
+            next
+          end
+          buf += "#{flag} "
+          len += flag.size
+        end
+        if (@modifier & MODIFIER_ADD).positive?
+          @args.each do |flag|
+            if len == MAXIMUM_LEN
+              buf += "\n"
+              len  = 0
+            end
+            buf += "#{flag} "
+            len += flag.size
+          end
+        end
+        buf.rstrip!
+        data.sub!(/^USE=["']?([^"']*)["']?$/, "USE=\"#{buf}\"")
+      else
+        data.concat("\n") if data[-1] != "\n"
+        @args.each do |arg|
+          if (@modifier & MODIFIER_ADD).positive?
+            data.concat("#{arg}\n")
+          else
+            data.gsub!(/#{arg}=["'][^"']+["']\n*/, "")
+          end
+        end
+      end
+      f.truncate(0)
+      f.write(data)
+    end
+  end
+end
+
+def show_help(exit_code)
+  puts "Usage: \e[1;36;49m#{$0}\e[0m <options> \e[1;34;49marg+\e[0m\n\n" \
+       "\e[1;33;49mOptions:\e[0m\n" \
+       "-m  --make       Edit make file </etc/portage/make.conf>\n" \
+       "-a  --add        Add a flag/var\n" \
+       "-d  --del        Delete a flag/var\n" \
+       "-V  --var        Change flag into variable decl\n" \
+       "-n  --name       Name of file for --pkg.* flags\n" \
+       "-e  --edit       Edit </etc/portage/make.conf>\n" \
+       "-u  --pkg.use    Add a use flag towards a pkg <value>\n" \
+       "-M  --pkg.mask   Add a mask towards a pkg <value>\n" \
+       "-U  --pkg.umask  Add a umask towards a pkg <value>\n" \
+       "-k  --pkg.kwd    Add a keyword towards a pkg <value>\n" \
+       "-h  --help       Show usage\n" \
+       "-v  --version    Show current version"
+    exit(exit_code)
+end
+
+type, modifier, name = Pkgedit::TYPE_MAKE, 0, nil
+opts.each do |opt, arg|
+  case opt
+  when "-m"
+    type = Pkgedit::TYPE_MAKE
+  when "-a"
+    modifier |= Pkgedit::MODIFIER_ADD
+    modifier &= ~Pkgedit::MODIFIER_DEL
+  when "-d"
+    modifier |= Pkgedit::MODIFIER_DEL
+    modifier &= ~Pkgedit::MODIFIER_ADD
+  when "-V"
+    modifier |= Pkgedit::MODIFIER_VAR
+  when "-n"
+    name = arg
+  when "-u"
+    type = Pkgedit::TYPE_PKG_USE
+  when "-M"
+    type = Pkgedit::TYPE_PKG_MASK
+  when "-U"
+    type = Pkgedit::TYPE_PKG_UMASK
+  when "-k"
+    type = Pkgedit::TYPE_PKG_KWD
+  when "-e"
+    if not File.exists?("/etc/portage/make.conf")
+      $stderr.puts("error: </etc/portage/make.conf> not found")
+      exit(false)
+    end
+    system("/usr/bin/vim /etc/portage/make.conf")
+    exit(true)
+  when "-h"
+    show_help(true)
+  when "-v"
+    puts "pkgedit 1.0.0"
+    exit(true)
+  end
+end
+if not type or not modifier or ARGV.size == 0
+  show_help(false)
+end
+Pkgedit.new(type, modifier, name, ARGV)

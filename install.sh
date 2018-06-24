@@ -1,0 +1,1 @@
+chmod ugo+x pkgedit; cp pkgedit /usr/bin
